@@ -2,18 +2,16 @@
 // Company: XeThru / Novelda
 // July 2018
 
-//#include <SoftwareSerial.h>
-//SoftwareSerial SerialRadar(10, 11); // RX, TX
 
 // SERIAL PORTS:
 // These definitions work for Arduino Mega, but must be changed for other Arduinos.
 //
-#define SerialRadar Serial		// Used for communication with the radar
-#define SerialDebug Serial1		// Used for printing debug information
+#define SerialRadar Serial1		// Used for communication with the radar
+#define SerialDebug Serial		// Used for printing debug information
 
 // Pin definitions
 #define RESET_PIN 2
-#define RADAR_RX_PIN 1
+#define RADAR_RX_PIN 18
 
 
 //
