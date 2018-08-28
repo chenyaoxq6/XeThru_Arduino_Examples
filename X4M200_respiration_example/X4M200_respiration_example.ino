@@ -74,9 +74,23 @@
 #define XTS_SPCO_SETCONTROL 0x10
 #define XTS_SPC_OUTPUT 0x41
 
+#define TX_BUF_LENGTH 64
 #define RX_BUF_LENGTH 64
-unsigned char send_buf[64];  // Buffer for sending data to radar. Size picked at random
-unsigned char recv_buf[RX_BUF_LENGTH];  // Buffer for receiving data from radar. Size picked at random
+
+unsigned char send_buf[TX_BUF_LENGTH];  // Buffer for sending data to radar. 
+unsigned char recv_buf[RX_BUF_LENGTH];  // Buffer for receiving data from radar.
+const char * states[7] = { "Breathing", "Movement", "Movement tracking", "No movement", "Initializing", "", "Unknown" };
+          
+// Struct to hold respiration message from radar
+typedef struct RespirationMessage {
+  uint32_t state_code;
+  float rpm;
+  float distance;
+  uint32_t signal_quality;
+  float movement_slow;
+  float movement_fast;
+};
+
 
 
 
@@ -131,111 +145,56 @@ void setup()
 
 void loop() {
   // For every loop we check to see if we have received any respiration data
-  get_respiration_data();
+  RespirationMessage msg;
+  if (get_respiration_data(&msg)) {
+    //Do something with msg...
+    SerialDebug.print("State: ");
+    SerialDebug.println(states[msg.state_code]);
+    SerialDebug.print("RPM: ");
+    SerialDebug.println(msg.rpm, 1);
+    SerialDebug.print("Distance: ");
+    SerialDebug.println(msg.distance, 1);
+    SerialDebug.print("signal_quality: ");
+    SerialDebug.println(msg.signal_quality);
+    SerialDebug.print("movement_slow: ");
+    SerialDebug.println(msg.movement_slow, 1);
+    SerialDebug.print("movement_fast: ");
+    SerialDebug.println(msg.movement_fast, 1);
+    SerialDebug.println("---");
+  }
 }
 
 
 
-float get_respiration_data() {
+int get_respiration_data(RespirationMessage * resp_msg) {
 
   // receive_data() fills recv_buf[] with data.
-  // If returned value is less than one, an error occured or no data was received.
   if (receive_data() < 1)
-    return 0.0;
+    return 0;
   
+  // Respiration Sleep message format:
   //
-  // Check that it's a sleep message. 
-  // If it's not, ignore (although this shouldn't happen if the output control is set correctly)
+  // <Start> + <XTS_SPR_APPDATA> + [XTS_ID_SLEEP_STATUS(i)] + [Counter(i)]
+  // + [StateCode(i)] + [RespirationsPerMinute(f)] + [Distance(f)]
+  // + [SignalQuality(i)] + [MovementSlow(f)] + [MovementFast(f)]
   //
   
-  // Combine bytes 2 to 5 into a unsigned integer
-  uint32_t xirs_recv = (uint32_t)recv_buf[2] | ((uint32_t)recv_buf[3] << 8) | ((uint32_t)recv_buf[4] << 16) | ((uint32_t)recv_buf[5] << 24);
+  // Check that it's a sleep message (XTS_ID_SLEEP_STATUS)
+  uint32_t xts_id = *((uint32_t*)&recv_buf[2]);
+  if (xts_id != XTS_ID_SLEEP_STATUS)
+    return 0;
   
-  // Compare to XTS_ID_SLEEP_STATUS
-  if (xirs_recv != XTS_ID_SLEEP_STATUS)
-  {
-    SerialDebug.print("Message not XTS_ID_SLEEP_STATUS: ");
-    return 0.0;
-  }
+  // Extract the respiration message data:
+  resp_msg->state_code = *((uint32_t*)&recv_buf[10]);
+  resp_msg->rpm = *((float*)&recv_buf[14]);
+  resp_msg->distance = *((float*)&recv_buf[18]);
+  resp_msg->signal_quality = *((uint32_t*)&recv_buf[22]);
+  resp_msg->movement_slow = *((float*)&recv_buf[26]);
+  resp_msg->movement_fast = *((float*)&recv_buf[30]);
   
-  
-  // Print out information about the current state
-  static unsigned char last_state_code = 0;   // For saving last state
-  unsigned char state_code = recv_buf[10];    // For the current state
-
-  if (last_state_code != state_code) {
-    SerialDebug.print("State: ");
-    switch (state_code) {
-      case XTS_VAL_RESP_STATE_BREATHING:
-        SerialDebug.println("Breathing ");
-        break;
-      
-      case XTS_VAL_RESP_STATE_MOVEMENT:
-        SerialDebug.println("Movement");
-        break;
-      
-      case XTS_VAL_RESP_STATE_MOVEMENT_TRACKING:
-        SerialDebug.println("Movement tracking");
-        break;
-      
-      case XTS_VAL_RESP_STATE_NO_MOVEMENT:
-        SerialDebug.println("No movement");
-        break;
-      
-      case XTS_VAL_RESP_STATE_INITIALIZING:
-        SerialDebug.println("Initializing");
-        break;
-      
-      case XTS_VAL_RESP_STATE_UNKNOWN:
-        SerialDebug.println("State unknown");
-        break;
-      
-      default:  
-        SerialDebug.println("Something else...");
-        break;
-    }
-
-    // Update current state
-    last_state_code = state_code;
-  }
-
-  // Extract the RPM if we are in breathing state:
-  float rpm = 0.0;
-  if ( state_code == XTS_VAL_RESP_STATE_BREATHING ) 
-  {
-    //Point float pointer to the first byte of the float in the buffer
-    float * rpm_ptr = (float*)&recv_buf[14];
-
-    // Get float value from pointer and print it out to user:
-    rpm = *rpm_ptr;    
-    SerialDebug.print("RPM: ");
-    SerialDebug.println(rpm, 1);  
-  }
-
-  return rpm;
+  // Return OK
+  return 1;
 }
-
-
-
-
-// Reset module
-void reset_module() 
-{
-  //Fill send buffer
-  send_buf[0] = XT_START;
-  send_buf[1] = XTS_SPC_MOD_RESET;
-  
-  //Send the command
-  send_command(2);
-
-  // Get ACK response from radar
-  get_ack();
-
-  // After the module has responded with ACK, it will wait
-  // for 0.5 seconds before the reset procedure starts.
-  delay(500);
-}
-
 
 
 // Stop module from running
@@ -427,12 +386,13 @@ void wait_for_ready_message()
     if (recv_buf[1] != XTS_SPR_SYSTEM)
       continue;
 
-    uint32_t response_code = (uint32_t)recv_buf[2] | ((uint32_t)recv_buf[3] << 8) | ((uint32_t)recv_buf[4] << 16) | ((uint32_t)recv_buf[5] << 24);
-    if (response_code == (uint32_t)XTS_SPRS_READY) {
+    //uint32_t response_code = (uint32_t)recv_buf[2] | ((uint32_t)recv_buf[3] << 8) | ((uint32_t)recv_buf[4] << 16) | ((uint32_t)recv_buf[5] << 24);
+    uint32_t response_code = *((uint32_t*)&recv_buf[2]);
+    if (response_code == XTS_SPRS_READY) {
       SerialDebug.println("Received XTS_SPRS_READY!");
       return;
     }
-    else if (response_code == (uint32_t)XTS_SPRS_BOOTING)
+    else if (response_code == XTS_SPRS_BOOTING)
       SerialDebug.println("Radar is booting...");
   }
 }
@@ -579,13 +539,14 @@ int receive_data() {
   }
 
   // Print received data
+  #if 0
   SerialDebug.print("Received: ");
   for (int i = 0; i < recv_len; i++) {
     SerialDebug.print(recv_buf[i], HEX);
     SerialDebug.print(" ");
   }
   SerialDebug.println(" ");
-
+  #endif
   
   // If nothing was received, return 0.
   if (recv_len==0)

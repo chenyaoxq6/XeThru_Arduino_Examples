@@ -71,10 +71,20 @@
 #define XTS_SPCO_SETCONTROL 0x10
 #define XTS_SPC_OUTPUT 0x41
 
+#define TX_BUF_LENGTH 64
+#define RX_BUF_LENGTH 64
 
-unsigned char send_buf[64];  // Buffer for sending data to radar. Size picked at random
-unsigned char recv_buf[64];  // Buffer for receiving data from radar. Size picked at random
-
+unsigned char send_buf[TX_BUF_LENGTH];  // Buffer for sending data to radar. 
+unsigned char recv_buf[RX_BUF_LENGTH];  // Buffer for receiving data from radar.
+const char * states[4] = { "No Presence", "Presence", "Initializing", "Unknown" };
+          
+// Struct to hold respiration message from radar
+typedef struct PresenceMessage {
+  uint32_t state_code;
+  float distance;
+  uint8_t dir;
+  uint32_t signal_quality;
+};
 
 
 void setup() 
@@ -125,102 +135,49 @@ void setup()
 
 
 void loop() {
-  // For every loop we check to see if we have received any respiration data
-  get_presence_data();
+  // For every loop we check to see if we have received any presence data
+  PresenceMessage msg;
+  if (get_presence_data(&msg)) {
+    //Do something with msg...
+    SerialDebug.print("State: ");
+    SerialDebug.println(states[msg.state_code]);
+    SerialDebug.print("Distance: ");
+    SerialDebug.println(msg.distance, 2);
+    SerialDebug.print("Direction: ");
+    SerialDebug.println(msg.dir);
+    SerialDebug.print("signal_quality: ");
+    SerialDebug.println(msg.signal_quality);
+    SerialDebug.println("---");
+  }
 }
 
 
-
-float get_presence_data() {
+int get_presence_data(PresenceMessage * pres_msg) {
 
   // receive_data() fills recv_buf[] with data.
-  // If returned value is less than one, an error occured or no data was received.
   if (receive_data() < 1)
-    return 0.0;
+    return 0;
   
+  // Presence message format:
   //
-  // Check that it's a presence message. 
-  // If it's not, ignore (although this shouldn't happen if the output control is set correctly)
+  // <Start> + <XTS_SPR_APPDATA> + [XTS_ID_PRESENCE_SINGLE(i)] + [Counter(i)]
+  // + [PresenceState(i)] + [Distance(f)] + <Direction> + [SignalQuality(i)] + <CRC>
+  // + <End>
   //
   
-  // Combine bytes 2 to 5 into a unsigned integer
-  uint32_t xirs_recv = (uint32_t)recv_buf[2] | ((uint32_t)recv_buf[3] << 8) | ((uint32_t)recv_buf[4] << 16) | ((uint32_t)recv_buf[5] << 24);
+  // Check that it's a presence message (XTS_ID_PRESENCE_SINGLE)
+  uint32_t xts_id = *((uint32_t*)&recv_buf[2]);
+  if (xts_id != XTS_ID_PRESENCE_SINGLE)
+    return 0;
   
-  // Compare to XTS_ID_PRESENCE_SINGLE
-  if (xirs_recv != XTS_ID_PRESENCE_SINGLE)
-  {
-    SerialDebug.print("Message not XTS_ID_PRESENCE_SINGLE: ");
-    return 0.0;
-  }
+  // Extract the respiration message data:
+  pres_msg->state_code = *((uint32_t*)&recv_buf[10]);
+  pres_msg->distance = *((float*)&recv_buf[14]);
+  pres_msg->dir = *((uint8_t*)&recv_buf[18]);
+  pres_msg->signal_quality = *((uint32_t*)&recv_buf[19]);
   
-  
-  // Print out information about the current state
-  static unsigned char last_state_code = 0;   // For saving last state
-  unsigned char state_code = recv_buf[10];    // For the current state
-
-  if (last_state_code != state_code) {
-    SerialDebug.print("State: ");
-    switch (state_code) {
-      case XTS_VAL_PRESENCE_PRESENCESTATE_NO_PRESENCE:
-        SerialDebug.println("No Presence");
-        break;
-      
-      case XTS_VAL_PRESENCE_PRESENCESTATE_PRESENCE:
-        SerialDebug.println("Presence");
-        break;
-      
-      case XTS_VAL_PRESENCE_PRESENCESTATE_INITIALIZING:
-        SerialDebug.println("Initializing");
-        break;
-      
-      case XTS_VAL_PRESENCE_PRESENCESTATE_UNKNOWN:
-        SerialDebug.println("State unknown");
-        break;
-      
-      default:  
-        SerialDebug.println("Something else...");
-        break;
-    }
-
-    // Update current state
-    last_state_code = state_code;
-  }
-
-  // Extract the distance if we are in presence state:
-  float distance = 0.0;
-  if ( state_code == XTS_VAL_PRESENCE_PRESENCESTATE_PRESENCE ) 
-  {
-    //Point float pointer to the first byte of the float in the buffer
-    float * distance_ptr = (float*)&recv_buf[14];
-
-    // Get float value from pointer and print it out to user:
-    distance = *distance_ptr;    
-    SerialDebug.print("Distance to object present: ");
-    SerialDebug.println(distance, 1);  
-  }
-
-  return distance;
-}
-
-
-
-
-// Reset module
-void reset_module() 
-{
-  //Fill send buffer
-  send_buf[0] = XT_START;
-  send_buf[1] = XTS_SPC_MOD_RESET;
-  
-  //Send the command
-  send_command(2);
-
-  // Get ACK response from radar
-  get_ack();
-
-  // After the module has responded with ACK, it will wait
-  // for 0.5 seconds before the reset procedure starts.
-  delay(500);
+  // Return OK
+  return 1;
 }
 
 
@@ -549,17 +506,24 @@ int receive_data() {
       recv_buf[recv_len++] = c;
       break;  //Exit this loop 
     }
+
+    if (recv_len >= RX_BUF_LENGTH) {
+      SerialDebug.println("BUFFER OVERFLOW!");
+      return -1;
+    }
     
     // Fill response buffer, and increase counter
     recv_buf[recv_len++] = c;
+
+    
 
     // Wait 10 ms if nothing is available yet
     if (!SerialRadar.available())
       delay(10);
   }
 
-  #if 1
   // Print received data
+  #if 0
   SerialDebug.print("Received: ");
   for (int i = 0; i < recv_len; i++) {
     SerialDebug.print(recv_buf[i], HEX);
@@ -600,7 +564,5 @@ int receive_data() {
     return -1; // Return -1 upon crc failure
   } 
 }
-
-
 
 
